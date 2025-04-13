@@ -6,6 +6,7 @@ import {
   KeyList,
   PrivateKey,
   RequestType,
+  SubscriptionHandle,
   TopicCreateTransaction,
   TopicId,
   TopicInfoQuery,
@@ -16,7 +17,9 @@ import {
 import { accounts } from "../../src/config";
 import assert from "node:assert";
 import ConsensusSubmitMessage = RequestType.ConsensusSubmitMessage;
-import { error } from "node:console";
+import { error, time } from "node:console";
+import { resolve } from "node:path";
+import { listeners } from "node:process";
 
 // Pre-configured client for test network (testnet)
 const client = Client.forTestnet();
@@ -107,23 +110,51 @@ When(
 
 Then(
   /^The message "([^"]*)" is received by the topic and can be printed to the console$/,
+  { timeout: 5 * 5000 },
   async function (message: string) {
-    new TopicMessageQuery().setTopicId(topicId).subscribe(
-      client,
-      (error) => {
-        console.error("Error receiving message:", error);
-      },
-      (message) => {
-        const receivedMessage = Buffer.from(message.contents).toString();
-        assert.equal(receivedMessage, message);
-      }
-    );
-    const txTopicMessageSubmit = await new TopicMessageSubmitTransaction()
-      .setTopicId(topicId)
-      .setMessage(message)
-      .execute(client);
+    let subscriptionHandle: SubscriptionHandle | null = null;
 
-    setTimeout(() => {}, 15000);
+    await new Promise((resolve, reject) => {
+      if (subscriptionHandle) {
+        subscriptionHandle.unsubscribe();
+        subscriptionHandle = null;
+      }
+      const query = new TopicMessageQuery().setTopicId(topicId).setStartTime(0);
+
+      const timeout = 20000;
+
+      const timeOutId = setTimeout(() => {
+        if (subscriptionHandle) {
+          subscriptionHandle.unsubscribe();
+          subscriptionHandle = null;
+        }
+        reject("Timeout");
+      }, timeout);
+
+      subscriptionHandle = query.subscribe(
+        client,
+        (error) => {
+          console.error("Subscription error, error");
+          clearTimeout(timeOutId);
+          subscriptionHandle = null;
+          reject(error);
+        },
+        (msg: TopicMessage) => {
+          const receivedMessage = Buffer.from(msg.contents).toString("utf8");
+          console.log("Received Message", receivedMessage);
+
+          if (receivedMessage == message) {
+            if (subscriptionHandle) {
+              subscriptionHandle.unsubscribe();
+              subscriptionHandle = null;
+            }
+            resolve(true);
+          }
+        }
+      );
+    });
+
+    assert.ok(true);
   }
 );
 
