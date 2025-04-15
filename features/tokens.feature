@@ -56,4 +56,4 @@ Feature: Token Service Use Cases
     Then The first account holds 90 HTT tokens
     And The second account holds 90 HTT tokens
     And The third account holds 105 HTT tokens
-  #   And The fourth account holds 115 HTT tokens
+    And The fourth account holds 115 HTT tokens

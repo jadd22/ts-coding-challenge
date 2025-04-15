@@ -6,10 +6,18 @@ import {
   PrivateKey,
   Status,
   TokenAssociateTransaction,
+  TokenCreateTransaction,
   TokenId,
+  TokenInfoQuery,
+  TokenMintTransaction,
+  TokenType,
+  TransactionId,
+  TransactionReceipt,
+  TransactionResponse,
   TransferTransaction,
 } from "@hashgraph/sdk";
 import { accounts } from "../../src/config";
+import { sign } from "node:crypto";
 
 export const TREASURY_ACCOUNT_ID = accounts[0].id;
 export const TREASURY_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
@@ -26,6 +34,11 @@ export const NEW_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
   accounts[2].privateKey
 );
 
+export const FOURTH_ACCOUNT_ID = accounts[3].id;
+export const FOURTH_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
+  accounts[3].privateKey
+);
+
 export const toDecimal = (amount: number, decimal: number) => {
   return amount * Math.pow(10, decimal);
 };
@@ -33,6 +46,96 @@ export const toDecimal = (amount: number, decimal: number) => {
 export const toNumber = (amount: number, decimal: number) => {
   return Math.floor(amount / decimal);
 };
+
+export async function createNewToken(
+  client: Client,
+  tokenName: string,
+  tokenSymbol: string,
+  initialSupply: number,
+  tokenDecimal: number,
+  treasuryAccountId: string,
+  treasuryPrivateKey: PrivateKey,
+  maxSupply: number = initialSupply
+): Promise<TokenId | null> {
+  try {
+    // Create Token Transaction
+    const txTokenCreate = await new TokenCreateTransaction()
+      .setTokenName(tokenName)
+      .setTokenSymbol(tokenSymbol)
+      .setDecimals(tokenDecimal)
+      .setTokenType(TokenType.FungibleCommon)
+      .setTreasuryAccountId(treasuryAccountId)
+      .setSupplyKey(treasuryPrivateKey)
+      .setInitialSupply(maxSupply)
+      .freezeWith(client);
+
+    //Sign the transaction with the token treasury account private key
+    const signTxTokenCreate = await txTokenCreate.sign(
+      TREASURY_ACCOUNT_PRIVATEKEY
+    );
+
+    //Sign the transaction with the client operator private key and submit to a Hedera network
+    const txTokenCreateResponse = await signTxTokenCreate.execute(client);
+
+    //Get the receipt of the transaction
+    const receiptTokenCreateTx = await txTokenCreateResponse.getReceipt(client);
+
+    //Get the transaction consensus status
+    const statusTokenCreateTx = await receiptTokenCreateTx.status;
+
+    const tokenId = receiptTokenCreateTx.tokenId;
+    if (statusTokenCreateTx.toString() != "SUCCESS") {
+      console.error(
+        "Failed to create new token!",
+        statusTokenCreateTx.toString()
+      );
+    }
+    if (tokenId == null) {
+      console.error("Failed to Create Token");
+      return null;
+    }
+    console.log("Create new token", tokenId.num.toString());
+    return tokenId;
+  } catch (error) {
+    console.error("Error creating token:", error);
+    return null;
+  }
+}
+
+export async function mintToken(
+  client: Client,
+  tokenId: TokenId,
+  tokenAmount: number,
+  accountPrivateKey: PrivateKey
+): Promise<boolean> {
+  try {
+    const txTokenMint = await new TokenMintTransaction()
+      .setTokenId(tokenId.num.toString())
+      .setAmount(toDecimal(tokenAmount, 2))
+      .freezeWith(client);
+    //Sign with the supply private key of the token
+    const signTxTokenMint = await txTokenMint.sign(accountPrivateKey);
+    const txTokenMintResponse = await signTxTokenMint.execute(client);
+    //Request the receipt of the transaction
+    const receiptTokenMintTx = await txTokenMintResponse.getReceipt(client);
+    //Get the transaction consensus status
+    const statusTokenMintTx = await receiptTokenMintTx.status;
+    console.log("statusTokenMintTx", statusTokenMintTx);
+    //Get the Transaction ID
+    const txTokenMintId = txTokenMintResponse.transactionId.toString();
+    console.log("Tx Token Mind Id", txTokenMintId);
+    // Verify the tokens were minted by checking the new supply
+    const tokenInfo = await new TokenInfoQuery()
+      .setTokenId(tokenId.num.toString())
+      .execute(client);
+
+    return statusTokenMintTx.toString() === "SUCCESS";
+  } catch (error) {
+    console.error("Error minting tokens:", error);
+    return false;
+  }
+}
+
 export async function getAccountTokenBalance(
   accountId: string,
   tokenId: TokenId,
@@ -137,7 +240,14 @@ export async function transferTokenToAccount(
       tokenId,
       client
     );
-
+    const toAccountBalance = await getAccountTokenBalance(
+      toAccountId,
+      tokenId,
+      client
+    );
+    // console.log("Before Transfer Balance");
+    // console.log(`First Account Balance: ${fromAccountBalance}`);
+    // console.log(`Second Account Balance: ${toAccountBalance}`);
     // Check sufficient token balance
     if (fromAccountBalance < amountInDecimal) {
       console.error(
@@ -174,4 +284,48 @@ export async function transferTokenToAccount(
     console.error("Failed to Transfer", error);
     return false;
   }
+}
+
+export async function createTokenTransferTransaction(
+  tokenId: string | TokenId,
+  from: string | AccountId,
+  to: string | AccountId,
+  amount: number
+): Promise<TransferTransaction> {
+  return new TransferTransaction()
+    .addTokenTransfer(tokenId, from, -amount)
+    .addTokenTransfer(tokenId, to, amount);
+}
+
+export async function submitTransactionAndSign(
+  transaction: TransferTransaction,
+  client: Client,
+  privateKey: PrivateKey
+): Promise<TransactionReceipt> {
+  const signedTx = await transaction.freezeWith(client).sign(privateKey);
+  const txResponse: TransactionResponse = await signedTx.execute(client);
+  const receipt: TransactionReceipt = await txResponse.getReceipt(client);
+  return receipt;
+}
+
+export async function submitTransactionWithCustomPayer(
+  transaction: TransferTransaction,
+  client: Client,
+  firstAccountId: AccountId | string,
+  firstPrivateKey: PrivateKey,
+  secondAccountId: AccountId | string,
+  secondPrivateKey: PrivateKey
+): Promise<TransactionReceipt> {
+  // Set transaction ID with custom payer
+  const transactionId = TransactionId.generate(firstAccountId);
+  transaction.setTransactionId(transactionId);
+
+  // free the transaction and sign by second account
+  let signedTx = await transaction.freezeWith(client).sign(secondPrivateKey);
+
+  // sign the transaction from first account to pay the fee
+  signedTx = await signedTx.sign(TREASURY_ACCOUNT_PRIVATEKEY);
+  const txResponse: TransactionResponse = await signedTx.execute(client);
+  const receipt: TransactionReceipt = await txResponse.getReceipt(client);
+  return receipt;
 }
