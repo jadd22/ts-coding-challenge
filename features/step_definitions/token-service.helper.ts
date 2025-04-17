@@ -107,7 +107,7 @@ export async function mintToken(
   tokenId: TokenId,
   tokenAmount: number,
   accountPrivateKey: PrivateKey
-): Promise<boolean> {
+): Promise<any> {
   try {
     const txTokenMint = await new TokenMintTransaction()
       .setTokenId(tokenId.num.toString())
@@ -129,7 +129,10 @@ export async function mintToken(
       .setTokenId(tokenId.num.toString())
       .execute(client);
 
-    return statusTokenMintTx.toString() === "SUCCESS";
+    if (statusTokenMintTx.toString() === "SUCCESS") {
+      return tokenInfo.tokenId;
+    }
+    return null;
   } catch (error) {
     console.error("Error minting tokens:", error);
     return false;
@@ -175,7 +178,7 @@ async function isAccountAssociatedWithToken(
     const tokenRelationships = accountInfo.tokenRelationships;
     return tokenRelationships && tokenRelationships.get(tokenId);
   } catch (error) {
-    console.error(`Error checking token association`);
+    console.error(`Error checking token association`, error);
     return false;
   }
 }
