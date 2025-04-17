@@ -32,16 +32,16 @@ import {
   TREASURY_ACCOUNT_PRIVATEKEY,
 } from "./token-service.helper";
 
-// const client = Client.forTestnet();
+const client = Client.forTestnet();
 let tokenId: TokenId;
 let transaction: TransferTransaction;
 let transactionRecord: TransactionRecord;
 
-const node = { "127.0.0.1:50211": new AccountId(3) };
-const mirrorNode = "127.0.0.1:5600";
+// const node = { "127.0.0.1:50211": new AccountId(3) };
+// const mirrorNode = "127.0.0.1:5600";
 
-// Create the client instance
-const client = Client.forNetwork(node).setMirrorNetwork(mirrorNode);
+// // Create the client instance
+// const client = Client.forNetwork(node).setMirrorNetwork(mirrorNode);
 
 Given(
   /^A Hedera account with more than (\d+) hbar$/,
