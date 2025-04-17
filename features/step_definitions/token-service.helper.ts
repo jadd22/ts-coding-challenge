@@ -1,8 +1,10 @@
 import {
   AccountBalanceQuery,
+  AccountCreateTransaction,
   AccountId,
   AccountInfoQuery,
   Client,
+  Hbar,
   PrivateKey,
   Status,
   TokenAssociateTransaction,
@@ -10,6 +12,7 @@ import {
   TokenId,
   TokenInfoQuery,
   TokenMintTransaction,
+  TokenSupplyType,
   TokenType,
   TransactionId,
   TransactionReceipt,
@@ -19,13 +22,14 @@ import {
 import { accounts } from "../../src/config";
 import { sign } from "node:crypto";
 
+// Update the Private Key based on key generation
 export const TREASURY_ACCOUNT_ID = accounts[0].id;
 export const TREASURY_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
   accounts[0].privateKey
 );
 
 export const SECOND_ACCOUNT_ID = accounts[1].id;
-export const SECOND_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringECDSA(
+export const SECOND_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
   accounts[1].privateKey
 );
 
@@ -36,6 +40,11 @@ export const NEW_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
 
 export const FOURTH_ACCOUNT_ID = accounts[3].id;
 export const FOURTH_ACCOUNT_PRIVATEKEY = PrivateKey.fromStringED25519(
+  accounts[3].privateKey
+);
+
+export const OPERATOR_ID = accounts[4].id;
+export const OPERATOR_KEY = PrivateKey.fromStringED25519(
   accounts[3].privateKey
 );
 
@@ -331,4 +340,92 @@ export async function submitTransactionWithCustomPayer(
   const txResponse: TransactionResponse = await signedTx.execute(client);
   const receipt: TransactionReceipt = await txResponse.getReceipt(client);
   return receipt;
+}
+
+export async function multiSignTokenAndDistribution(
+  client: Client,
+  amount: number
+): Promise<any> {
+  // For local node
+  // // Create the HTT token
+  // const OPERATOR_ID = AccountId.fromString("0.0.2");
+  // const OPERATOR_KEY = PrivateKey.fromString(
+  //   "302e020100300506032b65700422042091132178e72057a1d7528025956fe39b0b847f200ab59b2fdd367017f3087137"
+  // );
+  // client.setOperator(operatorId, operatorKey);
+
+  client.setOperator(OPERATOR_ID, OPERATOR_KEY);
+  const tokenCreateTx = await new TokenCreateTransaction()
+    .setTokenName("Test Token")
+    .setTokenSymbol("HTT")
+    .setTokenType(TokenType.FungibleCommon)
+    .setDecimals(2)
+    .setInitialSupply(toDecimal(1000, 2))
+    .setTreasuryAccountId(OPERATOR_ID)
+    .setSupplyType(TokenSupplyType.Infinite)
+    .freezeWith(client);
+
+  const tokenCreateSign = await tokenCreateTx.sign(OPERATOR_KEY);
+  const tokenCreateSubmit = await tokenCreateSign.execute(client);
+  const tokenCreateRx = await tokenCreateSubmit.getReceipt(client);
+  const tokenId = tokenCreateRx.tokenId!;
+  console.log(`Created token with ID: ${tokenId.toString()}`);
+
+  // associate all tokens
+  await associateAccountWithToken(
+    TREASURY_ACCOUNT_ID,
+    TREASURY_ACCOUNT_PRIVATEKEY,
+    tokenId,
+    client
+  );
+  await associateAccountWithToken(
+    SECOND_ACCOUNT_ID,
+    SECOND_ACCOUNT_PRIVATEKEY,
+    tokenId,
+    client
+  );
+  await associateAccountWithToken(
+    NEW_ACCOUNT_ID,
+    NEW_ACCOUNT_PRIVATEKEY,
+    tokenId,
+    client
+  );
+  await associateAccountWithToken(
+    FOURTH_ACCOUNT_ID,
+    FOURTH_ACCOUNT_PRIVATEKEY,
+    tokenId,
+    client
+  );
+  // Transfer 100 HTT tokens to each of the four accounts
+  const fromAccountId = OPERATOR_ID.toString();
+  await transferTokenToAccount(
+    fromAccountId,
+    TREASURY_ACCOUNT_ID,
+    tokenId,
+    amount,
+    client
+  );
+  await transferTokenToAccount(
+    fromAccountId,
+    SECOND_ACCOUNT_ID,
+    tokenId,
+    amount,
+    client
+  );
+  await transferTokenToAccount(
+    fromAccountId,
+    NEW_ACCOUNT_ID,
+    tokenId,
+    amount,
+    client
+  );
+  await transferTokenToAccount(
+    fromAccountId,
+    FOURTH_ACCOUNT_ID,
+    tokenId,
+    amount,
+    client
+  );
+
+  return tokenId;
 }

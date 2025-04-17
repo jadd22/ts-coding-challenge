@@ -22,8 +22,11 @@ import {
   FOURTH_ACCOUNT_PRIVATEKEY,
   getAccountTokenBalance,
   mintToken,
+  multiSignTokenAndDistribution,
   NEW_ACCOUNT_ID,
   NEW_ACCOUNT_PRIVATEKEY,
+  OPERATOR_ID,
+  OPERATOR_KEY,
   SECOND_ACCOUNT_ID,
   SECOND_ACCOUNT_PRIVATEKEY,
   toDecimal,
@@ -48,7 +51,7 @@ Given(
   async function (expectedBalance: number) {
     const account = accounts[0];
     const MY_ACCOUNT_ID = AccountId.fromString(account.id);
-    const MY_PRIVATE_KEY = PrivateKey.fromStringED25519(account.privateKey);
+    const MY_PRIVATE_KEY = PrivateKey.fromStringECDSA(account.privateKey);
     client.setOperator(MY_ACCOUNT_ID, MY_PRIVATE_KEY);
 
     //Create the query request
@@ -256,40 +259,37 @@ Given(
   /^A token named Test Token \(HTT\) with (\d+) tokens$/,
   { timeout: 30000 },
   async function (tokenAmount: number) {
-    //Create the transaction and freeze for manual signing
-    const tokenName: string = "Test Token";
-    const tokenSymbol: string = "HTT";
-    const tokenDecimal: number = 2;
+    // Set operator to treasury account
+    client.setOperator(TREASURY_ACCOUNT_ID, TREASURY_ACCOUNT_PRIVATEKEY);
 
-    // Create Token Transaction
-    const txTokenCreate = await new TokenCreateTransaction()
+    // Create token with specified amount
+    const tokenName = "Test Token";
+    const tokenSymbol = "HTT";
+    const decimals = 2;
+
+    const createTokenTx = await new TokenCreateTransaction()
       .setTokenName(tokenName)
       .setTokenSymbol(tokenSymbol)
-      .setDecimals(tokenDecimal)
-      .setTokenType(TokenType.FungibleCommon)
+      .setDecimals(decimals)
+      .setInitialSupply(toDecimal(tokenAmount, decimals))
       .setTreasuryAccountId(TREASURY_ACCOUNT_ID)
       .setSupplyKey(TREASURY_ACCOUNT_PRIVATEKEY)
-      .setInitialSupply(toDecimal(tokenAmount, 2))
       .freezeWith(client);
 
-    //Sign the transaction with the token treasury account private key
-    const signTxTokenCreate = await txTokenCreate.sign(
-      TREASURY_ACCOUNT_PRIVATEKEY
-    );
+    const signTx = await createTokenTx.sign(TREASURY_ACCOUNT_PRIVATEKEY);
+    const txResponse = await signTx.execute(client);
+    const receipt = await txResponse.getReceipt(client);
 
-    //Sign the transaction with the client operator private key and submit to a Hedera network
-    const txTokenCreateResponse = await signTxTokenCreate.execute(client);
-
-    //Get the receipt of the transaction
-    const receiptTokenCreateTx = await txTokenCreateResponse.getReceipt(client);
-
-    //Get the transaction consensus status
-    const statusTokenCreateTx = await receiptTokenCreateTx.status;
-
-    assert.ok(statusTokenCreateTx, "SUCCESS");
-    if (receiptTokenCreateTx?.tokenId) {
-      tokenId = receiptTokenCreateTx?.tokenId;
+    if (receipt.status.toString() !== "SUCCESS") {
+      throw new Error(`Failed to create token: ${receipt.status}`);
     }
+
+    if (!receipt.tokenId) {
+      throw new Error("Token ID is null in receipt");
+    }
+
+    tokenId = receipt.tokenId;
+    console.log(`Created token ${tokenId} with initial supply ${tokenAmount}`);
   }
 );
 Given(
@@ -309,14 +309,14 @@ Given(
     if (firstAccountBalance > expectedBalanceInDecimal) {
       const diffAmount = firstAccountBalance - expectedBalanceInDecimal;
       await associateAccountWithToken(
-        NEW_ACCOUNT_ID,
-        NEW_ACCOUNT_PRIVATEKEY,
+        OPERATOR_ID,
+        OPERATOR_KEY,
         tokenId,
         client
       );
       await transferTokenToAccount(
         TREASURY_ACCOUNT_ID,
-        NEW_ACCOUNT_ID,
+        OPERATOR_ID,
         tokenId,
         diffAmount,
         client
@@ -391,7 +391,12 @@ When(
   { timeout: 30000 },
   async function (tokenAmount: number) {
     const amount = toDecimal(tokenAmount, 2);
-
+    await associateAccountWithToken(
+      SECOND_ACCOUNT_ID,
+      SECOND_ACCOUNT_PRIVATEKEY,
+      tokenId,
+      client
+    );
     // step 1: create a transaction from first account
     transaction = new TransferTransaction()
       .addTokenTransfer(tokenId, TREASURY_ACCOUNT_ID, -amount)
@@ -401,7 +406,7 @@ When(
     transaction.freezeWith(client);
 
     // step 3: sign the pending transaction
-    await transaction.sign(SECOND_ACCOUNT_PRIVATEKEY);
+    await transaction.sign(TREASURY_ACCOUNT_PRIVATEKEY);
   }
 );
 When(/^The first account submits the transaction$/, async function () {
@@ -415,11 +420,12 @@ When(/^The first account submits the transaction$/, async function () {
 When(
   /^The second account creates a transaction to transfer (\d+) HTT tokens to the first account$/,
   async function (tokenAmount: number) {
-    // Client.forNetwork(node).setMirrorNetwork(mirrorNode);
     const newClient = Client.forTestnet();
+
+    // For local Node
     // const newClient = Client.forNetwork(node).setMirrorNetwork(mirrorNode);
+
     const amount = toDecimal(tokenAmount, 2);
-    newClient.setOperator(SECOND_ACCOUNT_ID, SECOND_ACCOUNT_PRIVATEKEY);
     // step 1: create a transaction from second account
     transaction = new TransferTransaction()
       .addTokenTransfer(tokenId, SECOND_ACCOUNT_ID, -amount)
@@ -437,204 +443,162 @@ Then(/^The first account has paid for the transaction fee$/, async function () {
     " transactionRecord.transactionId.accountId?.toString()",
     transactionRecord.transactionId.accountId?.toString()
   );
-  // assert.ok(
-  //   transactionRecord.transactionId.accountId?.toString() ==
-  //     TREASURY_ACCOUNT_ID.toString()
-  // );
 });
 Given(
   /^A first hedera account with more than (\d+) hbar and (\d+) HTT tokens$/,
   { timeout: 30000 },
   async function (expectedHBARBalance: number, expectedTokenBalance: number) {
-    // Reset Client to Treasury
-
+    // Set operator to treasury account
     client.setOperator(TREASURY_ACCOUNT_ID, TREASURY_ACCOUNT_PRIVATEKEY);
-    const tokenAmount = toDecimal(expectedTokenBalance, 2);
-    const accountBalanceQuery = await new AccountBalanceQuery().setAccountId(
-      TREASURY_ACCOUNT_ID
-    );
-    const accountBalance = await accountBalanceQuery.execute(client);
-    const hbarBalance = await accountBalance.hbars.toBigNumber().toNumber();
-    const tokenAccountBalance = await getAccountTokenBalance(
+
+    // Verify HBAR balance
+    const hbarBalance = await new AccountBalanceQuery()
+      .setAccountId(TREASURY_ACCOUNT_ID)
+      .execute(client);
+
+    if (hbarBalance.hbars.toBigNumber().toNumber() < expectedHBARBalance) {
+      throw new Error(`Insufficient HBAR balance for first account`);
+    }
+
+    // Verify token balance
+    const tokenBalance = await getAccountTokenBalance(
       TREASURY_ACCOUNT_ID,
       tokenId,
       client
     );
-    console.log("hbarBalance", hbarBalance);
-    console.log("hbarBalanceExp", expectedHBARBalance);
-    // assert.ok(hbarBalance >= expectedHBARBalance);
-    if (tokenAccountBalance < tokenAmount) {
-      await associateAccountWithToken(
-        TREASURY_ACCOUNT_ID,
-        TREASURY_ACCOUNT_PRIVATEKEY,
-        tokenId,
-        client
-      );
 
-      await transferTokenToAccount(
-        NEW_ACCOUNT_ID,
-        TREASURY_ACCOUNT_ID,
-        tokenId,
-        tokenAmount,
-        client
-      );
-    } else {
-      const tokenAccountBalanceUpdate = await getAccountTokenBalance(
-        TREASURY_ACCOUNT_ID,
-        tokenId,
-        client
-      );
-      console.log(
-        "tokenAccountBalanceUpdate",
-        tokenAccountBalanceUpdate.toString()
-      );
-      // assert.ok(tokenAccountBalanceUpdate >= tokenAmount);
+    if (tokenBalance < toDecimal(expectedTokenBalance, 2)) {
+      throw new Error(`Insufficient token balance for first account`);
     }
-    console.log("tokenAccountBalance", tokenAccountBalance.toString());
-    // assert.ok(tokenAccountBalance >= toDecimal(expectedTokenBalance, 2));
   }
 );
 Given(
   /^A second Hedera account with (\d+) hbar and (\d+) HTT tokens$/,
   { timeout: 30000 },
   async function (expectedHBARBalance: number, expectedTokenBalance: number) {
-    const tokenAmount = toDecimal(expectedTokenBalance, 2);
-    const accountBalanceQuery = await new AccountBalanceQuery().setAccountId(
-      SECOND_ACCOUNT_ID
+    // Set operator to second account
+    client.setOperator(SECOND_ACCOUNT_ID, SECOND_ACCOUNT_PRIVATEKEY);
+
+    // Verify HBAR balance
+    const hbarBalance = await new AccountBalanceQuery()
+      .setAccountId(SECOND_ACCOUNT_ID)
+      .execute(client);
+
+    if (hbarBalance.hbars.toBigNumber().toNumber() < expectedHBARBalance) {
+      throw new Error(`Insufficient HBAR balance for second account`);
+    }
+
+    // Associate account with token if not already associated
+    await associateAccountWithToken(
+      SECOND_ACCOUNT_ID,
+      SECOND_ACCOUNT_PRIVATEKEY,
+      tokenId,
+      client
     );
-    const accountBalance = await accountBalanceQuery.execute(client);
-    const hbarBalance = await accountBalance.hbars.toBigNumber().toNumber();
-    const tokenAccountBalance = await getAccountTokenBalance(
+
+    // Verify token balance
+    const tokenBalance = await getAccountTokenBalance(
       SECOND_ACCOUNT_ID,
       tokenId,
       client
     );
-    console.log("hbarBalance", hbarBalance);
-    console.log("hbarBalanceExp", expectedHBARBalance);
-    // assert.ok(hbarBalance >= expectedHBARBalance);
-    if (tokenAccountBalance < tokenAmount) {
-      await associateAccountWithToken(
-        SECOND_ACCOUNT_ID,
-        SECOND_ACCOUNT_PRIVATEKEY,
-        tokenId,
-        client
-      );
 
+    if (tokenBalance < toDecimal(expectedTokenBalance, 2)) {
+      // Transfer tokens from treasury to second account
       await transferTokenToAccount(
-        NEW_ACCOUNT_ID,
+        TREASURY_ACCOUNT_ID,
         SECOND_ACCOUNT_ID,
         tokenId,
-        tokenAmount,
+        toDecimal(expectedTokenBalance, 2),
         client
       );
-    } else {
-      const tokenAccountBalanceUpdate = await getAccountTokenBalance(
-        SECOND_ACCOUNT_ID,
-        tokenId,
-        client
-      );
-      console.log(
-        "tokenAccountBalanceUpdate",
-        tokenAccountBalanceUpdate.toString()
-      );
-      // assert.ok(tokenAccountBalanceUpdate >= tokenAmount);
     }
-    console.log("tokenAccountBalance", tokenAccountBalance.toString());
-    // assert.ok(tokenAccountBalance >= toDecimal(expectedTokenBalance, 2));
   }
 );
 Given(
   /^A third Hedera account with (\d+) hbar and (\d+) HTT tokens$/,
   { timeout: 30000 },
   async function (expectedHBARBalance: number, expectedTokenBalance: number) {
-    const tokenAmount = toDecimal(expectedTokenBalance, 2);
-    const accountBalanceQuery = await new AccountBalanceQuery().setAccountId(
-      NEW_ACCOUNT_ID
+    // Set operator to third account
+    client.setOperator(NEW_ACCOUNT_ID, NEW_ACCOUNT_PRIVATEKEY);
+
+    // Verify HBAR balance
+    const hbarBalance = await new AccountBalanceQuery()
+      .setAccountId(NEW_ACCOUNT_ID)
+      .execute(client);
+
+    if (hbarBalance.hbars.toBigNumber().toNumber() < expectedHBARBalance) {
+      throw new Error(`Insufficient HBAR balance for third account`);
+    }
+
+    // Associate account with token if not already associated
+    await associateAccountWithToken(
+      NEW_ACCOUNT_ID,
+      NEW_ACCOUNT_PRIVATEKEY,
+      tokenId,
+      client
     );
-    const accountBalance = await accountBalanceQuery.execute(client);
-    const hbarBalance = await accountBalance.hbars.toBigNumber().toNumber();
-    const tokenAccountBalance = await getAccountTokenBalance(
+
+    // Verify token balance
+    const tokenBalance = await getAccountTokenBalance(
       NEW_ACCOUNT_ID,
       tokenId,
       client
     );
-    console.log("hbarBalance", hbarBalance);
-    console.log("hbarBalanceExp", expectedHBARBalance);
 
-    if (tokenAccountBalance < tokenAmount) {
-      await associateAccountWithToken(
-        NEW_ACCOUNT_ID,
-        NEW_ACCOUNT_PRIVATEKEY,
-        tokenId,
-        client
-      );
-
+    if (tokenBalance < toDecimal(expectedTokenBalance, 2)) {
+      // Transfer tokens from treasury to third account
       await transferTokenToAccount(
         TREASURY_ACCOUNT_ID,
         NEW_ACCOUNT_ID,
         tokenId,
-        tokenAmount,
+        toDecimal(expectedTokenBalance, 2),
         client
-      );
-    } else {
-      const tokenAccountBalanceUpdate = await getAccountTokenBalance(
-        NEW_ACCOUNT_ID,
-        tokenId,
-        client
-      );
-      console.log(
-        "tokenAccountBalanceUpdate",
-        tokenAccountBalanceUpdate.toString()
       );
     }
-    console.log("tokenAccountBalance", tokenAccountBalance.toString());
   }
 );
 Given(
   /^A fourth Hedera account with (\d+) hbar and (\d+) HTT tokens$/,
   { timeout: 30000 },
   async function (expectedHBARBalance: number, expectedTokenBalance: number) {
-    const tokenAmount = toDecimal(expectedTokenBalance, 2);
-    const accountBalanceQuery = await new AccountBalanceQuery().setAccountId(
-      FOURTH_ACCOUNT_ID
+    // Set operator to fourth account
+    client.setOperator(FOURTH_ACCOUNT_ID, FOURTH_ACCOUNT_PRIVATEKEY);
+
+    // Verify HBAR balance
+    const hbarBalance = await new AccountBalanceQuery()
+      .setAccountId(FOURTH_ACCOUNT_ID)
+      .execute(client);
+
+    if (hbarBalance.hbars.toBigNumber().toNumber() < expectedHBARBalance) {
+      throw new Error(`Insufficient HBAR balance for fourth account`);
+    }
+
+    // Associate account with token if not already associated
+    await associateAccountWithToken(
+      FOURTH_ACCOUNT_ID,
+      FOURTH_ACCOUNT_PRIVATEKEY,
+      tokenId,
+      client
     );
-    const accountBalance = await accountBalanceQuery.execute(client);
-    const hbarBalance = await accountBalance.hbars.toBigNumber().toNumber();
-    const tokenAccountBalance = await getAccountTokenBalance(
+
+    // Verify token balance
+    const tokenBalance = await getAccountTokenBalance(
       FOURTH_ACCOUNT_ID,
       tokenId,
       client
     );
-    console.log("hbarBalance", hbarBalance);
-    console.log("hbarBalanceExp", expectedHBARBalance);
 
-    if (tokenAccountBalance < tokenAmount) {
-      await associateAccountWithToken(
-        FOURTH_ACCOUNT_ID,
-        FOURTH_ACCOUNT_PRIVATEKEY,
-        tokenId,
-        client
-      );
-
+    if (tokenBalance < toDecimal(expectedTokenBalance, 2)) {
+      // Transfer tokens from treasury to fourth account
       await transferTokenToAccount(
         TREASURY_ACCOUNT_ID,
         FOURTH_ACCOUNT_ID,
         tokenId,
-        tokenAmount,
+        toDecimal(expectedTokenBalance, 2),
         client
-      );
-    } else {
-      const tokenAccountBalanceUpdate = await getAccountTokenBalance(
-        FOURTH_ACCOUNT_ID,
-        tokenId,
-        client
-      );
-      console.log(
-        "tokenAccountBalanceUpdate",
-        tokenAccountBalanceUpdate.toString()
       );
     }
-    console.log("tokenAccountBalance", tokenAccountBalance.toString());
   }
 );
 When(
@@ -645,153 +609,41 @@ When(
     thirdAccountAmount: number,
     fourthAccountAmount: number
   ) {
+    // FOr local node
+    // const operatorId = AccountId.fromString("0.0.2");
+    // const operatorKey = PrivateKey.fromString(
+    //   "302e020100300506032b65700422042091132178e72057a1d7528025956fe39b0b847f200ab59b2fdd367017f3087137"
+    // );
+    // client.setOperator(operatorId, operatorKey);
+    const tokenAmount = toDecimal(100, 2);
+
+    // This method creates a new
+    // Associate all the accounts new token id
+    // Distribute the Token to all four accounts
+    tokenId = await multiSignTokenAndDistribution(client, tokenAmount);
     const amount = toDecimal(transferAmount, 2);
     const thirdAmount = toDecimal(thirdAccountAmount, 2);
     const fourthAmount = toDecimal(fourthAccountAmount, 2);
 
-    // Log initial balances
-    console.log("\n=== Initial Balances ===");
-    const treasuryBalance = await getAccountTokenBalance(
-      TREASURY_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Treasury Account (${TREASURY_ACCOUNT_ID}): ${treasuryBalance} HTT`
-    );
-
-    const secondAccountBalance = await getAccountTokenBalance(
-      SECOND_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Second Account (${SECOND_ACCOUNT_ID}): ${secondAccountBalance} HTT`
-    );
-
-    const thirdAccountBalance = await getAccountTokenBalance(
-      NEW_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Third Account (${NEW_ACCOUNT_ID}): ${thirdAccountBalance} HTT`
-    );
-
-    const fourthAccountBalance = await getAccountTokenBalance(
-      FOURTH_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Fourth Account (${FOURTH_ACCOUNT_ID}): ${fourthAccountBalance} HTT`
-    );
-
-    // If either account has insufficient balance, mint new tokens and transfer
-    if (treasuryBalance < amount || secondAccountBalance < amount) {
-      console.log("\n=== Minting Additional Tokens ===");
-      // Mint additional tokens to treasury
-      const mintAmount =
-        Math.max(amount - treasuryBalance, amount - secondAccountBalance) * 2;
-      console.log(`Minting ${mintAmount} new tokens to Treasury account`);
-
-      const txTokenMint = await new TokenMintTransaction()
-        .setTokenId(tokenId)
-        .setAmount(mintAmount)
-        .freezeWith(client);
-
-      const signTxTokenMint = await txTokenMint.sign(
-        TREASURY_ACCOUNT_PRIVATEKEY
-      );
-      const txTokenMintResponse = await signTxTokenMint.execute(client);
-      const receiptTokenMintTx = await txTokenMintResponse.getReceipt(client);
-      assert.equal(receiptTokenMintTx.status.toString(), "SUCCESS");
-      console.log("Minting successful!");
-
-      // If second account has insufficient balance, transfer tokens from treasury
-      if (secondAccountBalance < amount) {
-        console.log("\n=== Transferring Tokens to Second Account ===");
-        console.log(
-          `Transferring ${amount} tokens from Treasury to Second account`
-        );
-
-        const transferTx = new TransferTransaction()
-          .addTokenTransfer(tokenId, TREASURY_ACCOUNT_ID, -amount)
-          .addTokenTransfer(tokenId, SECOND_ACCOUNT_ID, amount)
-          .freezeWith(client);
-
-        const signTransferTx = await transferTx.sign(
-          TREASURY_ACCOUNT_PRIVATEKEY
-        );
-        const transferResponse = await signTransferTx.execute(client);
-        const transferReceipt = await transferResponse.getReceipt(client);
-        assert.equal(transferReceipt.status.toString(), "SUCCESS");
-        console.log("Transfer successful!");
-      }
-    }
-
-    console.log("\n=== Creating Multi-Party Transfer ===");
-    console.log(
-      `Transferring ${amount} tokens from Treasury and Second accounts`
-    );
-    console.log(`Transferring ${thirdAmount} tokens to Third account`);
-    console.log(`Transferring ${fourthAmount} tokens to Fourth account`);
-
-    // Create a multi-party transfer transaction
-    transaction = new TransferTransaction()
+    // Create the transfer transaction
+    const transferTx = new TransferTransaction()
       .addTokenTransfer(tokenId, TREASURY_ACCOUNT_ID, -amount) // First account transfer out
       .addTokenTransfer(tokenId, SECOND_ACCOUNT_ID, -amount) // Second account transfer out
       .addTokenTransfer(tokenId, NEW_ACCOUNT_ID, thirdAmount) // Third account transfer in
       .addTokenTransfer(tokenId, FOURTH_ACCOUNT_ID, fourthAmount); // Fourth account transfer in
 
-    // Freeze the transaction
-    transaction.freezeWith(client);
+    // Freeze the transaction to prepare for signing
+    const frozenTx = await transferTx.freezeWith(client);
 
-    // Sign with both sending accounts
-    await transaction.sign(TREASURY_ACCOUNT_PRIVATEKEY);
-    await transaction.sign(SECOND_ACCOUNT_PRIVATEKEY);
-
-    // Execute the transaction
-    const transferResponse = await transaction.execute(client);
-    const transferReceipt = await transferResponse.getReceipt(client);
-    assert.equal(transferReceipt.status.toString(), "SUCCESS");
-    console.log("Multi-party transfer successful!");
-
-    // Log final balances
-    console.log("\n=== Final Balances ===");
-    const finalTreasuryBalance = await getAccountTokenBalance(
-      TREASURY_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Treasury Account (${TREASURY_ACCOUNT_ID}): ${finalTreasuryBalance} HTT`
+    // To perform multi party transaction
+    // Sign with first account
+    const signedByFirstAccount = await frozenTx.sign(
+      TREASURY_ACCOUNT_PRIVATEKEY
     );
 
-    const finalSecondBalance = await getAccountTokenBalance(
-      SECOND_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Second Account (${SECOND_ACCOUNT_ID}): ${finalSecondBalance} HTT`
-    );
-
-    const finalThirdBalance = await getAccountTokenBalance(
-      NEW_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(`Third Account (${NEW_ACCOUNT_ID}): ${finalThirdBalance} HTT`);
-
-    const finalFourthBalance = await getAccountTokenBalance(
-      FOURTH_ACCOUNT_ID,
-      tokenId,
-      client
-    );
-    console.log(
-      `Fourth Account (${FOURTH_ACCOUNT_ID}): ${finalFourthBalance} HTT`
-    );
+    // Sign with the second account
+    // and assign to transaction so first signer can submit the transaction
+    transaction = await signedByFirstAccount.sign(SECOND_ACCOUNT_PRIVATEKEY);
   }
 );
 Then(
